@@ -21,6 +21,7 @@ REVIEW_TAG = os.environ.get("TAG_NAME", "").strip()
 FACE_BOX_SIZE = 256
 
 _owner_id: str | None = None
+_owner_warned = False
 
 
 def headers() -> dict:
@@ -29,12 +30,19 @@ def headers() -> dict:
 
 def get_owner_id() -> str | None:
     """Return the user ID of the API key owner, cached after first call."""
-    global _owner_id
+    global _owner_id, _owner_warned
     if _owner_id is None:
         try:
             r = requests.get(f"{IMMICH_URL}/api/users/me", headers=headers(), timeout=10)
             if r.status_code == 200:
                 _owner_id = r.json().get("id")
+            elif not _owner_warned:
+                # Logged once per process, this runs on every search page.
+                _owner_warned = True
+                log.warning(
+                    f"Could not read the API key owner (HTTP {r.status_code}), photos owned by other users "
+                    "will NOT be skipped. Add the user.read permission to the API key."
+                )
         except Exception as e:
             log.warning(f"get_owner_id failed: {e}")
     return _owner_id
@@ -380,19 +388,30 @@ def fetch_assets_in_range(taken_after_iso: str, taken_before_iso: str | None = N
 
 def _fetch_assets(query: dict, ts_field: str, label: str, extra_field: str | None = None) -> list[tuple]:
     out: list[tuple] = []
+    total = 0
+    skipped = 0
     for items in _search_metadata_pages(query, size=1000, label=label):
         owner_id = get_owner_id()
+        total += len(items)
         for a in items:
             aid = a.get("id")
             ts = a.get(ts_field) or a.get("localDateTime") or ""
             if aid and ts:
                 if owner_id and a.get("ownerId") != owner_id:
+                    skipped += 1
                     continue
                 if extra_field:
                     extra = a.get(extra_field) or ts
                     out.append((str(aid).strip("\x00"), ts, extra))
                 else:
                     out.append((str(aid).strip("\x00"), ts))
+    if skipped and skipped == total:
+        log.warning(
+            f"{label}: skipped all {total} assets, they are owned by another Immich user (partner sharing). "
+            "The API key probably belongs to a different user than the photos."
+        )
+    elif skipped:
+        log.warning(f"{label}: skipped {skipped} of {total} assets owned by another Immich user (partner sharing).")
     return out
 
 

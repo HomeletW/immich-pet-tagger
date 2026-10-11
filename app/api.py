@@ -26,7 +26,7 @@ import embedder as emb
 import immich as imm
 import state
 from embedder import embed_asset
-from inference import inference_session
+from inference import describe_model_failure, inference_session, model_error_count
 
 log = logging.getLogger("api")
 
@@ -46,11 +46,13 @@ async def _streaming_json(coro):
         task = asyncio.create_task(coro)
         while not task.done():
             yield b" \n"
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=KEEPALIVE_INTERVAL)
-            except asyncio.TimeoutError:
-                continue
-        result = await task
+            await asyncio.wait([task], timeout=KEEPALIVE_INTERVAL)  # never raises, even if the task did
+        try:
+            result = await task
+        except HTTPException as e:
+            # The 200 and the keepalive bytes are already sent, so the status code can no
+            # longer change. app.js api() turns this body into a thrown error.
+            result = {"stream_error": e.detail}
         yield json.dumps(result).encode()
 
     return StreamingResponse(generate(), media_type="application/json")
@@ -625,6 +627,13 @@ def _build_classifier_from_config(config: dict):
     return names, clf, scaler
 
 
+def _finder_error(summary: str, errors_before: int) -> RuntimeError:
+    """Error for a finder that could not score anything: summary plus the model failure
+    recorded since errors_before, if any. build_response turns it into a 503."""
+    reason = describe_model_failure(errors_before)
+    return RuntimeError(" ".join(p for p in (summary, reason) if p))
+
+
 @router.get("/pets/{name}/suggestions")
 async def get_suggestions(name: str, limit: int = 20):
     config = data.load_config(DATA_DIR)
@@ -725,12 +734,13 @@ async def get_borderline(name: str, limit: int = 40):
         state.borderline_progress["running"] = True
         try:
             with inference_session():
+                errors_before = model_error_count()
                 result = _build_classifier_from_config(config)
-                if result is None:
-                    return []
+                if result is None or name not in result[0]:
+                    # This pet has refs, so no classifier means they could not be embedded.
+                    log.warning(f"borderline for '{name}': classifier unavailable, no reference photo could be embedded")
+                    raise _finder_error(f"Could not process any reference photo for '{name}'.", errors_before)
                 names, clf, scaler = result
-                if name not in names:
-                    return []
                 pet_idx = names.index(name)
                 state.borderline_progress["total"] = len(candidates)
                 scored = []
@@ -749,6 +759,8 @@ async def get_borderline(name: str, limit: int = 40):
                             pet_prob = float(clf.predict_proba(scaler.transform(v))[0][pet_idx])
                             if LOW <= pet_prob < HIGH:
                                 scored.append((pet_prob, {**_slim_asset(a), "crops": [c], "score": round(pet_prob, 3)}))
+                if not scored and model_error_count() > errors_before:
+                    raise _finder_error("", errors_before)
                 scored.sort(key=lambda x: x[0])
                 return scored[:limit]
         finally:
@@ -1029,8 +1041,12 @@ async def get_neg_candidates(limit: int = 60):
         state.neg_progress["running"] = True
         try:
             with inference_session():
+                errors_before = model_error_count()
                 result = _build_classifier_from_config(config)
                 if result is None:
+                    if all_ref_ids:
+                        log.warning("negative candidates: classifier unavailable, no reference photo could be embedded")
+                        raise _finder_error("Could not process any reference photo.", errors_before)
                     return []
                 names, clf, scaler = result
                 unknown_idx = names.index("unknown") if "unknown" in names else -1
@@ -1047,6 +1063,8 @@ async def get_neg_candidates(limit: int = 60):
                         pet_prob = (1.0 - float(probs[unknown_idx])) if unknown_idx >= 0 else 0.0
                         if 0.30 <= pet_prob < THRESHOLD:
                             scored.append((pet_prob, a))
+                if not scored and model_error_count() > errors_before:
+                    raise _finder_error("", errors_before)
                 scored.sort(key=lambda x: x[0], reverse=True)
                 return scored[:limit]
         finally:

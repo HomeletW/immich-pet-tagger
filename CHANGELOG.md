@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.8.1
+
+### Action needed
+- Add the `user.read` permission to your Immich API key. The tagger uses it to identify the key's owner so photos owned by other Immich users (partner sharing) are skipped. It was missing from the documented list, so on keys created from that list the skip was silently off. Without it tagging keeps working as before, and the tagger now logs a warning at startup until the permission is added.
+
+### Fixed
+- When the models failed while running (for example the default GPU image on an NVIDIA card it does not support, which fails with `CUDA error: no kernel image is available`), the app only logged warnings: "Find references" and "Find candidates" came back empty and a scan finished with every counter at 0. Now the scan shows "Scan failed" with the reason, the finders show the error, and for an unsupported GPU the message says which image tag to use (`:cuda-legacy` or `:cpu`).
+- Photos that fail processing during a scan are now counted under "Failed" instead of not being counted at all.
+- A photo whose processing failed could be cached permanently as "no animal detected". Failures are no longer cached.
+- Errors from the slower actions (Find references, Find candidates, Find missed), such as a timeout or models failing to load, never reached the browser and showed up as a broken request. They are now shown as a readable message.
+- A scan now logs how many photos it skipped because they belong to another Immich user, including when that is all of them.
+- The "Find references" label said "similar to <pet>'s refs" even for a pet with no references.
+
 ## v1.8.0
 
 ### Features

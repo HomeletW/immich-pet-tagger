@@ -43,6 +43,7 @@ Uses CLIP embeddings and a few reference photos you provide. No cloud services, 
   | `face.create` | Writing face entries (the actual tagging) |
   | `face.read` | Checking existing faces on an asset |
   | `face.delete` | Removing face entries on ref removal or pet deletion |
+  | `user.read` | Identifying the API key's owner, so photos owned by other users (partner sharing) are skipped |
   | `tag.create` | Only with `TAG_NAME`: creating the review tag on first use |
   | `tag.asset` | Only with `TAG_NAME`: applying the review tag to tagged photos |
 

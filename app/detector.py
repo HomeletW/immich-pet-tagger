@@ -63,6 +63,9 @@ _yolo_stats_lock = threading.Lock()
 _yolo_worker_ready = threading.Event()
 # Set to an error string if loading fails.
 _yolo_load_error: str | None = None
+# Batches that failed at runtime, see the same pair in embedder.
+runtime_errors = 0
+last_runtime_error: tuple[float, str] | None = None  # (time.monotonic(), message)
 
 
 def is_yolo_ready() -> bool:
@@ -74,7 +77,7 @@ def get_yolo_error() -> str | None:
 
 
 def _yolo_batch_loop(worker_id: int) -> None:
-    global yolo_batch_total, yolo_batch_count, _yolo_load_error
+    global yolo_batch_total, yolo_batch_count, _yolo_load_error, runtime_errors, last_runtime_error
     from ultralytics import YOLO
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info(f"YOLO worker {worker_id} loading on {device}...")
@@ -129,6 +132,9 @@ def _yolo_batch_loop(worker_id: int) -> None:
                 req.event.set()
         except Exception as e:
             log.warning(f"YOLO worker {worker_id} batch error: {e}")
+            with _yolo_stats_lock:
+                runtime_errors += 1
+                last_runtime_error = (time.monotonic(), str(e) or type(e).__name__)
             for req in batch:
                 req.result = []
                 req.event.set()

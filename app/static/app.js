@@ -3,7 +3,10 @@ let pets = [], activePet = null, selectedCrops = new Map(), refsItems = [], negI
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
   if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(t); }
-  return r.json();
+  const d = await r.json();
+  // Streamed endpoints have already sent a 200 by the time they fail, the error is in the body.
+  if (d && d.stream_error) throw new Error(d.stream_error);
+  return d;
 }
 
 function toast(msg, type = '') {
@@ -368,7 +371,7 @@ async function viewSuggestions() {
   label.textContent = 'Finding references…';
   try {
     const d = await api(`/api/pets/${encodeURIComponent(pet.name)}/suggestions`);
-    label.textContent = `${d.assets.length} photo${d.assets.length !== 1 ? 's' : ''} similar to ${pet.name}'s refs`;
+    label.textContent = `${d.assets.length} photo${d.assets.length !== 1 ? 's' : ''} similar to ${pet.name}`;
     if (!d.assets.length) {
       grid.innerHTML = '<div class="empty" style="grid-column:1/-1;height:200px;"><div class="empty-icon">🐾</div><div class="empty-title">No suggestions found</div><div class="empty-sub">Add more refs or broaden the date range</div></div>';
       return;
