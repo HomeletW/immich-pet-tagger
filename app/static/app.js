@@ -368,7 +368,7 @@ async function viewSuggestions() {
   label.textContent = 'Finding references…';
   try {
     const d = await api(`/api/pets/${encodeURIComponent(pet.name)}/suggestions`);
-    label.textContent = `${d.assets.length} photo${d.assets.length !== 1 ? 's' : ''} similar to ${pet.name}'s refs`;
+    label.textContent = `${d.assets.length} photo${d.assets.length !== 1 ? 's' : ''} similar to ${pet.name}`;
     if (!d.assets.length) {
       grid.innerHTML = '<div class="empty" style="grid-column:1/-1;height:200px;"><div class="empty-icon">🐾</div><div class="empty-title">No suggestions found</div><div class="empty-sub">Add more refs or broaden the date range</div></div>';
       return;
