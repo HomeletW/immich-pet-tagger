@@ -14,6 +14,7 @@ import data
 import detector as det
 import embedder as emb
 import immich as imm
+import inference
 
 log = logging.getLogger("poller")
 
@@ -162,9 +163,11 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
     if negative_ids:
         log.info(f"Loaded {len(negative_ids)} negative samples")
 
+    errors_before = inference.model_error_count()
     result = clf_mod.build_classifier(pet_names, refs_per_pet, negative_ids)
     if result is None:
-        return
+        reason = inference.describe_model_failure(errors_before)
+        raise RuntimeError("Could not process any reference photo, so nothing was scanned." + (f" {reason}" if reason else ""))
     names, clf, scaler = result
 
     last_ts = scan_since if manual else data.load_last_timestamp(dd)
@@ -193,6 +196,13 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
     threshold = THRESHOLD
     threshold_fallback = THRESHOLD_FALLBACK
     yolo_conf = det.YOLO_CONF
+    failed_assets: set[str] = set()
+
+    def mark_failed(aid: str) -> None:
+        with _count_lock:
+            if aid not in failed_assets:
+                failed_assets.add(aid)
+                counts["failed"] += 1
 
     def process_asset(aid: str, time_str: str) -> None:
         if cancel and cancel.is_set():
@@ -206,6 +216,7 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
             with _count_lock:
                 counts["no_thumb"] += 1
             return
+        asset_errors_before = inference.model_error_count()
         detected = emb.crop_animals(img, conf=yolo_conf)
         if not detected:
             crops = [(None, img)]
@@ -217,14 +228,18 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
 
         # Populate the crop cache so borderline and suggestions can reuse this
         # work without re-fetching and re-embedding. Only real animal crops are
-        # stored; an empty list marks "no animal detected".
-        emb.store_crops(aid, [(b, v) for b, v in vecs if b is not None and v is not None])
+        # stored; an empty list marks "no animal detected". A failed inference must not be
+        # cached as that. The counter is shared, so a concurrent failure on another asset
+        # can skip caching this one too, which is harmless.
+        if all(v is not None for _, v in vecs) and inference.model_error_count() == asset_errors_before:
+            emb.store_crops(aid, [(b, v) for b, v in vecs if b is not None])
 
         existing_persons: set | None = None
         tagged_in_photo: set[str] = set()
 
         for bbox_norm, vec in vecs:
             if vec is None:
+                mark_failed(aid)
                 continue
 
             pet_name, prob = clf_mod.classify(vec, names, clf, scaler)
@@ -295,6 +310,7 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
                 future.result()
             except Exception as e:
                 log.warning(f"Asset {futures[future]} failed: {e}")
+                mark_failed(futures[future])
 
     elapsed = time.time() - t0
     clip_avg = emb.get_avg_batch_size()
@@ -308,6 +324,11 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
     )
 
     emb.save_embed_cache()
+
+    # Raised before the cursor is saved, so the next cycle retries these assets.
+    reason = inference.describe_model_failure(errors_before)
+    if reason and failed_assets and len(failed_assets) >= len(assets) - counts["no_thumb"]:
+        raise RuntimeError(f"Could not process any of the {len(failed_assets)} scanned photos. {reason}")
 
     if not manual:
         next_ts = _advance_ms(latest_ts)

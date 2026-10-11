@@ -80,6 +80,26 @@ def inference_session():
                 log.info("Inference models unloaded")
 
 
+def model_error_count() -> int:
+    """YOLO + CLIP batches that failed at runtime in this process. Compare before and
+    after a piece of work to tell whether it hit a model error."""
+    return det.runtime_errors + emb.runtime_errors
+
+
+def describe_model_failure(since: int = 0) -> str | None:
+    """The most recent runtime model error as one user-facing sentence, or None if no
+    error was recorded after model_error_count() was `since`."""
+    if model_error_count() <= since:
+        return None
+    _, text = max(e for e in (det.last_runtime_error, emb.last_runtime_error) if e)
+    first_line = (text.strip().splitlines() or [text])[0].rstrip(".")
+    msg = f"Model inference failed: {first_line}."
+    if "no kernel image is available" in text:
+        msg += (" Your GPU is not supported by this image. Use the :cuda-legacy image tag for "
+                "older NVIDIA cards (GTX 9xx/10xx), or the :cpu tag.")
+    return msg
+
+
 _SCAN_WORKER = str(Path(__file__).parent / "scan_worker.py")
 
 

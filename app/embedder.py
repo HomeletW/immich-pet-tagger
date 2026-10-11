@@ -8,6 +8,7 @@ import queue
 import re
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -74,6 +75,10 @@ _clip_batch_total = 0
 _clip_batch_count = 0
 _stats_lock = threading.Lock()
 _clip_load_error: str | None = None
+# Batches that failed at runtime (e.g. a GPU this torch build has no kernels for). The
+# batch loop only logs them, so they are counted here for inference.model_error_count().
+runtime_errors = 0
+last_runtime_error: tuple[float, str] | None = None  # (time.monotonic(), message)
 
 
 def reset_batch_stats() -> None:
@@ -97,6 +102,7 @@ def get_clip_error() -> str | None:
 
 def _clip_batch_loop(worker_id: int) -> None:
     global _clip_batch_total, _clip_batch_count, _clip_preprocess_fn, _clip_load_error
+    global runtime_errors, last_runtime_error
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info(f"CLIP worker {worker_id} loading on {device}...")
     try:
@@ -148,6 +154,9 @@ def _clip_batch_loop(worker_id: int) -> None:
                 vecs = feats.cpu().numpy()
         except Exception as e:
             log.warning(f"CLIP worker {worker_id} batch error: {e}")
+            with _stats_lock:
+                runtime_errors += 1
+                last_runtime_error = (time.monotonic(), str(e) or type(e).__name__)
             vecs = [None] * len(batch)
 
         for req, vec in zip(batch, vecs):
@@ -366,12 +375,20 @@ def get_crops_and_embed(asset_id: str) -> list[tuple[dict, np.ndarray]]:
     img = fetch_thumbnail(asset_id)
     if img is None:
         return []  # transient fetch failure, do not cache
+    import inference
+    errors_before = inference.model_error_count()
     pairs: list[tuple[list, np.ndarray]] = []
+    complete = True
     for bbox, crop_img in crop_animals(img):
         vec = embed_image(crop_img)
         if vec is not None:
             pairs.append((list(bbox), vec))
-    store_crops(asset_id, pairs)
+        else:
+            complete = False
+    # A failed inference must not be cached as "no animal here". The counter is shared, so a
+    # concurrent failure on another asset can skip caching this one too, which is harmless.
+    if complete and inference.model_error_count() == errors_before:
+        store_crops(asset_id, pairs)
     return _crops_to_result(pairs)
 
 
