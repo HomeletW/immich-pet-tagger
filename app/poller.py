@@ -185,6 +185,7 @@ def _run_poll_cycle(dd: Path, counts: dict, on_date=None, cancel=None, low_conf_
         # against, since a late-imported old photo can have a recent createdAt.
         assets = imm.fetch_assets_created_after(last_ts)
     log.info(f"Fetched {len(assets)} assets in {time.time()-t0:.1f}s")
+    counts["fetched"] = len(assets)
 
     if not assets:
         log.info("No new assets.")

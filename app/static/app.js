@@ -2,7 +2,12 @@ let pets = [], activePet = null, selectedCrops = new Map(), refsItems = [], negI
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
-  if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(t); }
+  if (!r.ok) {
+    let t = await r.text().catch(() => r.statusText);
+    // FastAPI errors are {"detail": "..."}, show the message instead of the raw JSON.
+    try { const j = JSON.parse(t); if (j && typeof j.detail === 'string') t = j.detail; } catch(_) {}
+    throw new Error(t);
+  }
   const d = await r.json();
   // Streamed endpoints have already sent a 200 by the time they fail, the error is in the body.
   if (d && d.stream_error) throw new Error(d.stream_error);
@@ -515,7 +520,7 @@ async function addSelectedAsNegatives() {
     });
     selectedCrops.clear(); updateSelUI();
     await loadNegatives();
-    toast('Added to "not my pets"', 'success');
+    toast('Added to "not a pet"', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -545,9 +550,9 @@ async function viewNegCandidates() {
     clearInterval(negPollTimer); negPollTimer = null;
     if (negGeneration !== myGen) return;
     updateNegStatus();
-    label.textContent = `${d.assets.length} candidate${d.assets.length !== 1 ? 's' : ''} for "not my pets"`;
+    label.textContent = `${d.assets.length} candidate${d.assets.length !== 1 ? 's' : ''} for "not a pet"`;
     if (!d.assets.length) {
-      grid.innerHTML = '<div class="empty" style="grid-column:1/-1;height:200px;"><div class="empty-icon">🐾</div><div class="empty-title">No candidates found</div><div class="empty-sub">Classifier is well calibrated</div></div>';
+      grid.innerHTML = '<div class="empty" style="grid-column:1/-1;height:200px;"><div class="empty-icon">🐾</div><div class="empty-title">No candidates found</div><div class="empty-sub">No uncertain photos in this random sample. Click "Find candidates" again to try another sample.</div></div>';
       return;
     }
     const thr = d.threshold || 0.8;
@@ -579,12 +584,12 @@ async function clearAllRefs() {
 }
 
 async function clearAllNegatives() {
-  if (!confirm(`Remove all "not my pets" photos from Pet Tagger? This will not affect Immich.`)) return;
+  if (!confirm(`Remove all "not a pet" photos from Pet Tagger? This will not affect Immich.`)) return;
   try {
     await api('/api/negatives/all', { method: 'DELETE' });
     negIds = [];
     await loadNegatives();
-    toast('All "not my pets" cleared', 'success');
+    toast('All "not a pet" photos cleared', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -594,7 +599,7 @@ async function removeNegative(id) {
     negIds = negIds.filter(i => i !== id);
     await loadNegatives();
     document.getElementById('th-' + id)?.classList.remove('is-neg');
-    toast('Removed from "not my pets"');
+    toast('Removed from "not a pet"');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -665,7 +670,9 @@ function showScanResult(r) {
   if (r.counts) {
     const c = r.counts;
     el.innerHTML = '<div class="scan-result-header">Scan result</div>' +
+      (c.fetched === 0 ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;">No photos found in this date range.</div>' : '') +
       '<div class="poll-stats" style="margin-top:6px;">' +
+      (c.fetched != null ? stat('Photos scanned', c.fetched, '') : '') +
       stat('Tagged', c.added, 'nonzero-good') +
       stat('Low conf.', c.low_confidence, 'nonzero-warn') +
       stat('Other', c.unknown, '') +

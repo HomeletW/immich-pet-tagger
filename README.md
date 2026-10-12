@@ -18,7 +18,7 @@ Uses CLIP embeddings and a few reference photos you provide. No cloud services, 
 
 - **Import from Immich**: if Immich already recognizes your pet as a person, import them in one click. The tool picks up to 20 evenly distributed reference photos automatically.
 - **Find similar photos**: uses a two-stage search to surface candidates. Your reference photos are used as visual queries against Immich's smart search, and the local classifier re-ranks the results by pet probability. Falls back to text search using your description when no refs exist yet.
-- **Find candidates for "not my pets"**: samples random photos from your library, scores them with the classifier, and surfaces the top 60 most likely to confuse it for bulk review.
+- **Find candidates for "not a pet"**: samples 50 random photos from your library, scores them with the classifier, and shows the ones it is unsure about for bulk review.
 - **Negative samples**: mark photos that look like your pet but aren't, to sharpen the classifier's ability to reject false positives.
 - **Date ranges**: restrict a pet to photos taken within a specific period (useful for pets that have passed away or were adopted later).
 - **Scan controls**: set the scan start date and trigger a scan from the sidebar; the last scan stats are shown live.

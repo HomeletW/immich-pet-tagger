@@ -152,7 +152,8 @@ async def _visual_search(
 
     base: dict = {"size": per_ref_limit, **_pet_image_search_params(pet_cfg)}
 
-    async def fetch_one(rid: str) -> list[dict]:
+    async def fetch_one(rid: str) -> list[dict] | None:
+        """Items for one ref query, or None if the query failed (an empty list is a real result)."""
         try:
             resp = await client.post(
                 f"{imm.IMMICH_URL}/api/search/smart",
@@ -161,11 +162,14 @@ async def _visual_search(
             )
             if resp.status_code == 200:
                 return resp.json().get("assets", {}).get("items", [])
-        except Exception:
-            pass
-        return []
+            log.warning(f"visual search for ref {rid}: HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"visual search for ref {rid} failed: {e}")
+        return None
 
-    results = await asyncio.gather(*[fetch_one(rid) for rid in sampled])
+    results = [r for r in await asyncio.gather(*[fetch_one(rid) for rid in sampled]) if r is not None]
+    if sampled and not results:
+        raise HTTPException(status_code=502, detail="Immich smart search failed for every reference photo, see the pet tagger logs")
     seen: set[str] = set()
     candidates: list[dict] = []
     for items in results:
@@ -648,13 +652,14 @@ async def get_suggestions(name: str, limit: int = 20):
     ref_ids = data.load_pet_asset_ids(pet_cfg.get("person_id") or name, DATA_DIR)
     ref_set = set(ref_ids)
     neg_ids = set(data.load_negative_ids(DATA_DIR))
-    exclude = ref_set | neg_ids
+    exclude = ref_set | neg_ids | set(data.load_skipped_ids(DATA_DIR))
 
     async with httpx.AsyncClient(timeout=30) as client:
         if ref_ids:
             candidates = await _visual_search(client, ref_ids, pet_cfg, exclude)
         else:
-            body: dict = {"query": description, "size": 60, **_pet_image_search_params(pet_cfg)}
+            # Ask for enough to still have results once the excluded photos are filtered out.
+            body: dict = {"query": description, "size": min(1000, 60 + len(exclude)), **_pet_image_search_params(pet_cfg)}
             resp = await client.post(f"{imm.IMMICH_URL}/api/search/smart", headers=imm.headers(), json=body)
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
