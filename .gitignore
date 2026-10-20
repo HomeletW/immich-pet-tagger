@@ -10,3 +10,7 @@ __pycache__/
 *.log
 docker-compose.override.yml
 TODO.md
+.venv/
+.pytest_cache/
+accounts.json
+data-multi/

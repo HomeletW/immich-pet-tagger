@@ -8,6 +8,7 @@ import time
 
 import httpx
 import requests
+import accounts
 
 log = logging.getLogger("immich")
 
@@ -25,11 +26,15 @@ _owner_warned = False
 
 
 def headers() -> dict:
-    return {"x-api-key": IMMICH_API_KEY, "Accept": "application/json"}
+    account = accounts.current()
+    return {"x-api-key": account.api_key if account else IMMICH_API_KEY, "Accept": "application/json"}
 
 
 def get_owner_id() -> str | None:
     """Return the user ID of the API key owner, cached after first call."""
+    account = accounts.current()
+    if account is not None:
+        return account.owner_id or account.verify()
     global _owner_id, _owner_warned
     if _owner_id is None:
         try:
@@ -99,6 +104,9 @@ def resolve_review_tag_id_sync() -> str | None:
     """Return the id of REVIEW_TAG, creating the tag on first use. None if disabled/failed."""
     if not REVIEW_TAG:
         return None
+    account = accounts.current()
+    if account is not None:
+        return account.review_tag(REVIEW_TAG)
     if _review_tag_resolved:
         return _review_tag_id
     with _review_tag_lock:
@@ -125,6 +133,9 @@ async def resolve_review_tag_id(client: httpx.AsyncClient) -> str | None:
     is no concurrent first call to collapse."""
     if not REVIEW_TAG:
         return None
+    account = accounts.current()
+    if account is not None:
+        return account.review_tag(REVIEW_TAG)
     if _review_tag_resolved:
         return _review_tag_id
     try:

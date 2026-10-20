@@ -1,5 +1,7 @@
 # immich-pet-tagger
 
+> **Multi-account support:** opt-in [multi-account mode](docs/multi-account.md) shares pet enrollment and GPU models across several owners on one Immich server. Existing single-account configuration remains supported.
+
 Automatic pet tagging for Immich. Identifies your pets in new photos and tags them as people in Immich, the same way Immich tags human faces, but for cats, dogs, or any visually distinct subject.
 
 Uses CLIP embeddings and a few reference photos you provide. No cloud services, no training required, runs entirely on your own hardware as a Docker sidecar alongside Immich.

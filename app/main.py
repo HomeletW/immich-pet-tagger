@@ -6,6 +6,11 @@ Starts the FastAPI enrollment UI and the background polling loop.
 import asyncio
 import logging
 import os
+
+MULTI_ACCOUNT = bool(os.environ.get("IMMICH_ACCOUNTS_FILE"))
+if MULTI_ACCOUNT:
+    # One shared YOLO/CLIP worker across all owners and UI operations.
+    os.environ["GPU_WORKERS"] = "1"
 from contextlib import asynccontextmanager
 
 import torch
@@ -13,10 +18,21 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-
 from pathlib import Path
 from embedder import load_embed_cache
-from api import router as api_router
+if MULTI_ACCOUNT:
+    from accounts import load_accounts
+    from multi_service import Service, BusyError
+    from multi_api import create_router
+    multi_service = Service(
+        load_accounts(os.environ['IMMICH_ACCOUNTS_FILE']),
+        Path(os.environ.get('DATA_DIR', '/data')) / 'multi',
+        batch_size=int(os.environ.get('ACCOUNT_BATCH_SIZE', '64')),
+        workers=int(os.environ.get('SCAN_WORKERS', '8')),
+    )
+    api_router = create_router(multi_service)
+else:
+    from api import router as api_router
 import inference
 import detector as det
 import embedder as emb
@@ -43,6 +59,13 @@ async def polling_loop():
     while True:
         try:
             log.info("Starting poll cycle...")
+            if MULTI_ACCOUNT:
+                try:
+                    multi_service.start_scan()
+                except BusyError:
+                    pass
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
             async with state.scan_lock:
                 state.scan_cancel.clear()
                 await asyncio.to_thread(inference.run_scan, DATA_DIR, migrate=not migrated, cancel=state.scan_cancel)
@@ -64,6 +87,8 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
+    if MULTI_ACCOUNT:
+        await asyncio.to_thread(multi_service.shutdown)
 
 
 app = FastAPI(title="Immich Pet Tagger", lifespan=lifespan)
@@ -80,6 +105,7 @@ async def health():
 @app.get("/api/status")
 async def status():
     return {
+        "mode": "multi-account" if MULTI_ACCOUNT else "single-account",
         "poll_interval": POLL_INTERVAL,
         "data_dir": DATA_DIR,
         "immich_url": os.environ.get("IMMICH_URL", "not set"),
@@ -99,17 +125,19 @@ NO_CACHE_HEADERS = {"Cache-Control": "no-cache"}
 
 @app.get("/")
 async def root():
-    return FileResponse(str(BASE_DIR / "static" / "index.html"), headers=NO_CACHE_HEADERS)
+    return FileResponse(str(BASE_DIR / "static" / ("multi.html" if MULTI_ACCOUNT else "index.html")), headers=NO_CACHE_HEADERS)
 
 
 @app.get("/accuracy.html")
 async def accuracy_page():
+    if MULTI_ACCOUNT:
+        return FileResponse(str(BASE_DIR / "static" / "multi.html"), headers=NO_CACHE_HEADERS)
     return FileResponse(str(BASE_DIR / "static" / "accuracy.html"), headers=NO_CACHE_HEADERS)
 
 
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=8000,
         reload=False,

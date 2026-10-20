@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Family pet tagger</title><link rel="stylesheet" href="/static/multi.css"><script defer src="/static/multi.js"></script></head>
+<body>
+<header><h1>Family pet tagger</h1><p>One enrollment collection · separate photo owners</p></header>
+<main>
+<p class="notice">Administrator workspace: references from every configured account are visible here. Photo ownership and sharing in Immich remain unchanged.</p>
+<p id="message" role="status" aria-live="polite"></p>
+<section><h2>Scanning</h2>
+<form id="scan-form"><label>Account<select id="scan-account"><option value="">All accounts</option></select></label><label>Rescan from<input type="date" id="since"></label><label>Through<input type="date" id="until"></label><button>Start scan</button><button type="button" id="stop">Stop scan</button></form>
+<p>Leave dates empty to process new and pending photos. Set a start date to re-evaluate existing photos after changing enrollment.</p>
+<p id="scan-state"></p><div id="progress"></div></section>
+<section><h2>Pets</h2>
+<form id="create-form"><label>Name<input id="new-name" required maxlength="100"></label><label>Description<input id="new-description" maxlength="500"></label><button>Add pet</button></form>
+<label>Enrollment<select id="pet"><option value="">Not my pets / negatives</option></select></label>
+<div id="pet-controls" hidden><form id="edit-form"><label>Name<input id="edit-name" required maxlength="100"></label><label>Description<input id="edit-description" maxlength="500"></label><label>Valid from<input id="pet-since" type="date"></label><label>Valid through<input id="pet-until" type="date"></label><button>Save changes</button></form><p id="person-mappings"></p><button id="remove-pet">Remove enrollment only</button> <button id="delete-pet">Delete pet from all accounts</button> <button id="reset-pet">Reset tags in selected source account</button></div>
+</section>
+<section><h2>Reference photos</h2>
+<form id="reference-form"><label>Source account<select id="source-account" required></select></label><label>Immich asset ID or photo URL<input id="asset" required placeholder="Paste an Immich photo URL"></label><label>Optional crop: x1,y1,x2,y2<input id="bbox" placeholder="0.1,0.1,0.9,0.9"></label><button>Add reference</button></form>
+<p>Add clear examples from any account. References and negatives train one classifier for all accounts. Crop coordinates are normalized between 0 and 1; leave empty for automatic animal detection.</p>
+<div id="references" class="grid"></div></section>
+<section><h2>Recent uncertain matches</h2><p>Choose a pet above, then add a correct match as a reference, or mark it as a negative example. Rescan its date range to apply enrollment changes.</p><div id="review" class="grid"></div></section>
+</main>
+</body></html>

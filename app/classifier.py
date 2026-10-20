@@ -2,6 +2,7 @@
 
 import logging
 import random
+from contextlib import nullcontext
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -15,7 +16,8 @@ log = logging.getLogger("classifier")
 def build_classifier(
     pet_names: list[str],
     refs_per_pet: dict[str, list[dict]],
-    negative_ids: list[str] | None = None,
+    negative_ids: list[str] | list[dict] | None = None,
+    *, reference_context=None, strict: bool = False,
 ) -> tuple[list[str], LogisticRegression, StandardScaler] | None:
     all_vecs = []
     all_labels = []
@@ -26,35 +28,43 @@ def build_classifier(
         refs = refs_per_pet.get(name, [])
         log.info(f"Embedding {len(refs)} refs for '{name}'...")
         for ref in refs:
-            asset_id = ref["asset_id"]
-            bbox = ref.get("bbox")
-            if bbox:
-                vec = emb.embed_crop_by_bbox(asset_id, bbox)
-                if vec is not None:
-                    all_vecs.append(vec)
-                    all_labels.append(i)
+            before = len(all_vecs)
+            with reference_context(ref) if reference_context else nullcontext():
+                asset_id = ref["asset_id"]
+                bbox = ref.get("bbox")
+                if bbox:
+                    vec = emb.embed_crop_by_bbox(asset_id, bbox)
+                    if vec is not None:
+                        all_vecs.append(vec)
+                        all_labels.append(i)
+                    else:
+                        log.warning(f"  Skipped ref {asset_id} for '{name}' (could not embed crop)")
                 else:
-                    log.warning(f"  Skipped ref {asset_id} for '{name}' (could not embed crop)")
-            else:
-                vecs = emb.embed_asset_crops(asset_id, require_animal=True)
-                if not vecs:
-                    vecs = emb.embed_asset_crops(asset_id, require_animal=False)
-                if vecs:
-                    all_vecs.extend(vecs)
-                    all_labels.extend([i] * len(vecs))
-                else:
-                    log.warning(f"  Skipped ref {asset_id} for '{name}' (thumbnail unavailable)")
+                    vecs = emb.embed_asset_crops(asset_id, require_animal=True)
+                    if not vecs:
+                        vecs = emb.embed_asset_crops(asset_id, require_animal=False)
+                    if vecs:
+                        all_vecs.extend(vecs)
+                        all_labels.extend([i] * len(vecs))
+                    else:
+                        log.warning(f"  Skipped ref {asset_id} for '{name}' (thumbnail unavailable)")
+            if strict and len(all_vecs) == before:
+                raise RuntimeError("A reference could not be embedded; enrollment was not partially trained")
 
     total_refs = sum(len(refs) for refs in refs_per_pet.values())
     if negative_ids:
         target = total_refs * 3
         if len(negative_ids) > target:
-            negative_ids = random.Random(0).sample(sorted(negative_ids), target)
+            negative_ids = random.Random(0).sample(sorted(negative_ids, key=str), target)
             log.info(f"Subsampled negatives to {target} (3x {total_refs} refs)")
 
         log.info(f"Embedding {len(negative_ids)} negative samples...")
-        for aid in negative_ids:
-            vecs = emb.embed_asset_crops(aid)
+        for negative in negative_ids:
+            ref = negative if isinstance(negative, dict) else {"asset_id": negative}
+            with reference_context(ref) if reference_context else nullcontext():
+                vecs = emb.embed_asset_crops(ref["asset_id"])
+            if strict and not vecs:
+                raise RuntimeError("A negative reference could not be embedded")
             for vec in vecs:
                 all_vecs.append(vec)
                 all_labels.append(unknown_idx)
