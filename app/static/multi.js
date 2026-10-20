@@ -16,10 +16,10 @@ async function api(path, method='GET', body) {
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
   return data;
 }
-async function action(work) {
+async function action(work, success='Saved.') {
   if (pending) return;
   pending = true;
-  try { await work(); message('Saved.'); await refresh(); }
+  try { await work(); await refresh(); message(success); }
   catch (e) { message(e.message, true); }
   finally { pending = false; }
 }
@@ -51,14 +51,17 @@ function card(ref) {
   for (const text of [ref.account, ref.asset_id]) {const p = document.createElement('p'); p.textContent = text; el.append(p);}
   return el;
 }
-function button(el, label, fn) {
+function button(el, label, fn, success='Saved.') {
   const b = document.createElement('button'); b.textContent = label;
-  b.onclick = () => action(fn); el.append(b);
+  b.dataset.enrollment = 'true';
+  b.onclick = () => action(fn, success); el.append(b);
 }
 function renderRefs() {
   const petId = $('pet').value;
   const refs = petId ? snapshot.pets[petId].refs : snapshot.negatives;
+  $('reference-heading').textContent = petId ? 'References for ' + snapshot.pets[petId].name + ' (' + refs.length + ')' : 'Not my pets — negative references (' + refs.length + ')';
   $('references').replaceChildren();
+  if (!refs.length) $('references').textContent = petId ? 'No reference photos yet.' : 'No negative references yet. Mark an uncertain match “Not my pets” to add one here.';
   for (const ref of refs) {
     const el = card(ref);
     button(el, 'Remove reference', () => api('/references','DELETE',{...ref,pet_id:petId || null}));
@@ -71,14 +74,35 @@ function renderRefs() {
     button(el, 'Use as selected pet reference', () => {
       if (!$('pet').value) throw new Error('Choose a pet first.');
       return api('/references','POST',{account:ref.account,asset_id:ref.asset_id,pet_id:$('pet').value});
-    });
-    button(el, 'Not my pets', () => api('/references','POST',{account:ref.account,asset_id:ref.asset_id}));
+    }, 'Saved as a pet reference. Rescan its date range to apply this feedback.');
+    button(el, 'Not my pets', () => api('/references','POST',{account:ref.account,asset_id:ref.asset_id}), 'Saved to “Not my pets / negatives”. Rescan its date range to apply this feedback.');
     $('review').append(el);
   }
+  if (!(snapshot.review || []).length) $('review').textContent = 'No uncertain matches awaiting review.';
+  syncControls();
+}
+function syncControls() {
+  const running = snapshot.scan.running;
+  $('start').disabled = running;
+  $('stop').disabled = !running;
+  $('review-status').textContent = running ? 'A scan is running. Stop it and wait for “Stopped” before editing references or reviewing matches. Pending work is saved.' : 'Ready to review. Negative references are available under Enrollment → Not my pets / negatives.';
+  document.querySelectorAll('[data-enrollment], #create-form button, #edit-form button, #reference-form button, #remove-pet, #delete-pet, #reset-pet').forEach(b => {
+    b.disabled = running;
+    b.title = running ? 'Stop the current scan before editing enrollment.' : '';
+  });
 }
 function renderProgress() {
   const scan = snapshot.scan;
-  $('scan-state').textContent = scan.running ? 'Scanning ' + (scan.current_account || 'references') + '…' : scan.error ? 'Scan failed: ' + scan.error : scan.cancelled ? 'Stopped. Pending work is saved.' : 'Idle. ' + (scan.finished_at ? 'Last finished: ' + new Date(scan.finished_at).toLocaleString() : '');
+  const phaseNames = {discovering:'Discovering assets',loading_models:'Loading GPU models',training:'Training from shared references',processing:'Tagging assets',unloading_models:'Releasing GPU models'};
+  $('scan-state').textContent = scan.running ? (phaseNames[scan.phase] || 'Scanning') + (scan.current_account ? ' · ' + scan.current_account : '') : scan.error ? 'Scan failed: ' + scan.error : scan.cancelled ? 'Stopped. Pending work is saved.' : scan.finished_at ? 'Scan finished.' : 'Idle — no scan has run since startup.';
+  const total = scan.total || 0, completed = scan.completed || 0, retry = scan.retry || 0, attempted = completed + retry;
+  const percent = total ? Math.min(100, Math.floor(attempted / total * 100)) : 0;
+  const bar = $('scan-progress');
+  if (scan.running && scan.phase === 'discovering') bar.removeAttribute('value');
+  else bar.value = percent;
+  $('scan-detail').textContent = scan.running && scan.phase === 'discovering' ? 'Building this run’s queue; total becomes available after discovery.' : total ? percent + '% attempted · ' + completed.toLocaleString() + ' completed · ' + retry.toLocaleString() + ' queued for retry · ' + Math.max(0,total-attempted).toLocaleString() + ' remaining · ' + total.toLocaleString() + ' assets in this run' : 'No queued work for this run.';
+  const elapsed = scan.started_at ? Math.max(0, Math.floor(((scan.running ? Date.now() : Date.parse(scan.finished_at)) - Date.parse(scan.started_at)) / 1000)) : 0;
+  $('scan-timing').textContent = scan.started_at ? 'Started ' + new Date(scan.started_at).toLocaleString() + ' · Elapsed ' + Math.floor(elapsed/60) + 'm ' + elapsed%60 + 's · Updates every 5 seconds' : 'Updates every 5 seconds';
   $('progress').replaceChildren();
   const table = document.createElement('table');
   const heading = document.createElement('tr');
@@ -88,10 +112,15 @@ function renderProgress() {
     [id,jobs.pending||0,jobs.retry||0,jobs.done||0,scan.accounts[id] || state.error || ''].forEach(text=>{const td=document.createElement('td');td.textContent=text;row.append(td);});table.append(row);
   }
   $('progress').append(table);
+  syncControls();
 }
 let refsSignature = '';
+let refreshSequence = 0;
 async function refresh() {
-  snapshot = await api('/state');
+  const sequence = ++refreshSequence;
+  const next = await api('/state');
+  if (sequence !== refreshSequence) return;
+  snapshot = next;
   options('source-account',snapshot.accounts.map(x=>[x,x]));
   options('scan-account',snapshot.accounts.map(x=>[x,x]),'All accounts');
   options('pet',Object.entries(snapshot.pets).map(([id,p])=>[id,p.name]),'Not my pets / negatives');
@@ -113,7 +142,7 @@ $('reference-form').onsubmit = event => {event.preventDefault();action(async()=>
   $('asset').value='';$('bbox').value='';
 });};
 $('scan-form').onsubmit = event => {event.preventDefault();action(()=>api('/scan','POST',{account:$('scan-account').value||null,since:$('since').value||null,until:$('until').value||null}));};
-$('stop').onclick = () => action(()=>api('/scan/stop','POST'));
+$('stop').onclick = () => action(()=>api('/scan/stop','POST'), 'Stop requested. Waiting for active work to finish; pending work is saved.');
 $('remove-pet').onclick = () => {if(confirm('Remove this shared enrollment? Existing Immich tags will remain.')) action(()=>api('/pets/'+$('pet').value+'?local_only=true','DELETE'));};
 $('delete-pet').onclick = () => {if(confirm('Delete this pet and its person records from EVERY linked Immich account?')) action(()=>api('/pets/'+$('pet').value,'DELETE'));};
 $('reset-pet').onclick = () => {if(confirm('Remove this pet’s person record and tags in '+$('source-account').value+'? Shared references stay. Run a dated rescan to retag.')) action(()=>api('/pets/'+$('pet').value+'/reset/'+encodeURIComponent($('source-account').value),'POST'));};

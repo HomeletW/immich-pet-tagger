@@ -62,6 +62,9 @@ class Service:
 
     def public_state(self):
         enrollment = self.store.enrollment()
+        refs = enrollment["negatives"] + [
+            ref for pet in enrollment["pets"].values() for ref in pet["refs"]
+        ]
         status = self.status
         snapshot = {**status, "accounts": status["accounts"].copy()}
         return {
@@ -69,7 +72,9 @@ class Service:
             **enrollment,
             "scan": snapshot,
             "progress": self.store.summary(),
-            "review": self.store.review(),
+            "review": self.store.review(
+                excluded={(ref["account"], ref["asset_id"]) for ref in refs}
+            ),
         }
 
     def create_pet(self, name, description="", since=None, until=None):
@@ -255,7 +260,7 @@ class Service:
                     self.store.complete(
                         account.id, job["asset"], [{"outcome": "skipped_hidden_video"}]
                     )
-                    return
+                    return "done"
                 img = emb.fetch_thumbnail(job["asset"])
                 if img is None:
                     raise RuntimeError("Thumbnail unavailable")
@@ -308,6 +313,7 @@ class Service:
                         {"pet": pet_id, "probability": probability, "outcome": outcome}
                     )
                 self.store.complete(account.id, job["asset"], outcomes)
+                return "done"
         except Exception as exc:
             # Errors are bounded and credentials are never stored in this queue.
             error = (
@@ -321,6 +327,7 @@ class Service:
                 account.id,
                 type(exc).__name__,
             )
+            return "retry"
 
     def start_scan(self, selected=None, since=None, until=None):
         with self.thread_lock:
@@ -352,7 +359,13 @@ class Service:
     def scan(self, selected=None, since=None, until=None):
         with self.exclusive():
             cycle_started = time.time()
-            self.status = {"running": True, "error": None, "accounts": {}}
+            self.status = {
+                "running": True, "error": None, "accounts": {},
+                "phase": "discovering",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "selected_accounts": list(selected or self.accounts),
+                "total": 0, "completed": 0, "retry": 0,
+            }
             try:
                 doc = self.store.enrollment()
                 if not any(p["refs"] for p in doc["pets"].values()):
@@ -362,6 +375,7 @@ class Service:
                     if self.cancel.is_set():
                         break
                     try:
+                        self.status["current_account"] = account_id
                         account = self.account(account_id)
                         self.ensure_persons(account, doc)
                         self.discover(account, since, until)
@@ -377,7 +391,16 @@ class Service:
                         self.store.account_error(account_id, error)
                 if not enabled or self.cancel.is_set():
                     return
+                self.status["total"] = sum(
+                    self.store.ready_count(account.id, cycle_started)
+                    for account in enabled
+                )
+                self.status["current_account"] = None
+                if not self.status["total"]:
+                    return
+                self.status["phase"] = "loading_models"
                 with inference.inference_session():
+                    self.status["phase"] = "training"
                     errors_before = inference.model_error_count()
                     trained = self.train(doc)
                     if inference.model_error_count() != errors_before:
@@ -386,6 +409,7 @@ class Service:
                         )
                     if trained is None:
                         raise RuntimeError("No usable pet references")
+                    self.status["phase"] = "processing"
                     while not self.cancel.is_set():
                         processed = False
                         for account in enabled:
@@ -401,17 +425,22 @@ class Service:
                             # Explicitly bind the account inside every task: ContextVars
                             # do not automatically propagate into ThreadPoolExecutor.
                             with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                                list(
-                                    pool.map(
-                                        lambda job: self.process(
-                                            account, job, doc, trained
-                                        ),
-                                        jobs,
-                                    )
+                                results = pool.map(
+                                    lambda job: self.process(
+                                        account, job, doc, trained
+                                    ),
+                                    jobs,
                                 )
+                                for result in results:
+                                    if result == "done":
+                                        self.status["completed"] += 1
+                                    elif result == "retry":
+                                        self.status["retry"] += 1
                         if not processed:
                             break
                     emb.save_embed_cache()
+                    self.status["phase"] = "unloading_models"
+                    self.status["current_account"] = None
             except Exception as exc:
                 self.status["error"] = (
                     str(exc)
@@ -423,3 +452,8 @@ class Service:
                 self.status["running"] = False
                 self.status["finished_at"] = datetime.now(timezone.utc).isoformat()
                 self.status["cancelled"] = self.cancel.is_set()
+                self.status["phase"] = (
+                    "failed" if self.status["error"] else
+                    "stopped" if self.cancel.is_set() else "finished"
+                )
+                self.status["current_account"] = None

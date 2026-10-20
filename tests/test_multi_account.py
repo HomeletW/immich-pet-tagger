@@ -638,3 +638,63 @@ def test_model_failure_during_training_prevents_writes(setup_service, monkeypatc
     service.scan()
     assert service.status["error"] == "Model failure while preparing shared references"
     assert not fake.writes
+
+
+@pytest.mark.parametrize('negative', [True, False])
+def test_saved_review_leaves_queue_and_returns_if_reference_removed(setup_service, negative):
+    service, fake, pet, _, *_ = setup_service
+    asset = fake.add_asset('user_a')
+    service.account('user_a')
+    service.store.enqueue('user_a', [(asset, '2026-01-01')])
+    service.store.complete('user_a', asset, [{'outcome': 'low_confidence', 'pet': pet, 'probability': 0.6}])
+    assert [r['asset_id'] for r in service.public_state()['review']] == [asset]
+    service.add_reference('user_a', asset, None if negative else pet)
+    assert service.public_state()['review'] == []
+    service.remove_reference('user_a', asset, None if negative else pet)
+    assert [r['asset_id'] for r in service.public_state()['review']] == [asset]
+
+
+def test_review_exclusions_apply_before_page_limit(tmp_path):
+    store = Store(tmp_path)
+    try:
+        store.bind('user_a', 'owner-a')
+        assets = [(str(i), '2026-01-%02d' % (i + 1)) for i in range(5)]
+        store.enqueue('user_a', assets)
+        for asset, _ in assets:
+            store.complete('user_a', asset, [{'outcome': 'low_confidence'}])
+        rows = store.review(limit=2, excluded=[('user_a', '4'), ('user_a', '3')])
+        assert [r['asset_id'] for r in rows] == ['2', '1']
+    finally:
+        store.close()
+
+
+def test_scan_progress_counts_this_run_and_retries(setup_service):
+    service, fake, _, ref, *_ = setup_service
+    failed = fake.add_asset('user_a')
+    fake.thumbnail_failures.add(failed)
+    service.scan(['user_a'])
+    assert service.status['phase'] == 'finished'
+    assert service.status['total'] == 2
+    assert service.status['completed'] == 1
+    assert service.status['retry'] == 1
+    assert service.status['current_account'] is None
+    service.scan(['user_a'])
+    assert service.status['total'] == 0  # Finished item and deferred retry excluded.
+    assert service.status['completed'] == 0
+
+
+def test_scan_exposes_training_and_processing_phases(setup_service, monkeypatch):
+    service, _, _, _, *_ = setup_service
+    phases = []
+    train = service.train
+    process = service.process
+    def checked_train(doc):
+        phases.append(service.public_state()['scan']['phase'])
+        return train(doc)
+    def checked_process(*args):
+        phases.append(service.public_state()['scan']['phase'])
+        return process(*args)
+    monkeypatch.setattr(service, 'train', checked_train)
+    monkeypatch.setattr(service, 'process', checked_process)
+    service.scan(['user_a'])
+    assert phases == ['training', 'processing']

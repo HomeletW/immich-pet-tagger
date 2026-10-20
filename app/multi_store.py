@@ -103,6 +103,13 @@ class Store:
                 )
             ]
 
+    def ready_count(self, account, ready_at):
+        with self.lock:
+            return self.db.execute(
+                "SELECT count(*) FROM jobs WHERE account=? AND status<>'done' AND retry_at<=?",
+                (account, ready_at),
+            ).fetchone()[0]
+
     def complete(self, account, asset, result):
         with self.lock, self.db:
             self.db.execute(
@@ -147,11 +154,18 @@ class Store:
                 for r in self.db.execute("SELECT * FROM accounts").fetchall()
             }
 
-    def review(self, limit=40):
+    def review(self, limit=40, excluded=()):
         with self.lock:
             rows = self.db.execute(
-                "SELECT account,asset,taken,result FROM jobs WHERE status='done' AND result LIKE '%low_confidence%' ORDER BY taken DESC LIMIT ?",
-                (limit,),
+                """SELECT account,asset,taken,result FROM jobs
+                WHERE status='done' AND result LIKE '%low_confidence%'
+                AND NOT EXISTS (
+                    SELECT 1 FROM json_each(?) AS reviewed
+                    WHERE json_extract(reviewed.value, '$[0]') = jobs.account
+                    AND json_extract(reviewed.value, '$[1]') = jobs.asset
+                )
+                ORDER BY taken DESC LIMIT ?""",
+                (json.dumps(list(excluded)), limit),
             ).fetchall()
             return [
                 {
