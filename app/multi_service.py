@@ -232,9 +232,12 @@ class Service:
                     )
                     if not taken or (since is None and not created):
                         continue
-                    assets.append((asset["id"], taken))
                     if created:
                         watermark = max(watermark, created)
+                    # Motion-photo companion videos have no independent preview.
+                    if asset.get("type") == "VIDEO" and asset.get("visibility") == "hidden":
+                        continue
+                    assets.append((asset["id"], taken))
                 self.store.enqueue(account.id, assets, rescan=since is not None)
             if since is None and not self.cancel.is_set():
                 # Inclusive boundary + durable dedup handle equal timestamps. Do not
@@ -247,7 +250,12 @@ class Service:
             return
         try:
             with accounts.using(account):
-                account.require_asset(job["asset"])
+                asset = account.require_asset(job["asset"])
+                if asset.get("type") == "VIDEO" and asset.get("visibility") == "hidden":
+                    self.store.complete(
+                        account.id, job["asset"], [{"outcome": "skipped_hidden_video"}]
+                    )
+                    return
                 img = emb.fetch_thumbnail(job["asset"])
                 if img is None:
                     raise RuntimeError("Thumbnail unavailable")

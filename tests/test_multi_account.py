@@ -541,7 +541,8 @@ def test_date_range_does_not_tag_outside_pet_lifetime(setup_service):
     assert service.store.summary()["user_a"]["jobs"] == {"done": 1}
 
 
-def test_main_multi_mode_routes_and_single_worker(tmp_path):
+@pytest.mark.parametrize("interval", ["0", "3600"])
+def test_main_multi_mode_routes_and_single_worker(tmp_path, interval):
     # Fresh interpreter proves import ordering sets worker count before ML modules.
     import os
     import subprocess
@@ -555,7 +556,13 @@ def test_main_multi_mode_routes_and_single_worker(tmp_path):
 import conftest
 import main
 import detector, embedder
+import asyncio
 from fastapi.testclient import TestClient
+polls = []
+async def polling():
+    polls.append(True)
+    await asyncio.sleep(3600)
+main.polling_loop = polling
 assert detector.YOLO_WORKERS == embedder.GPU_WORKERS == 1
 with TestClient(main.app) as client:
     assert client.get('/').status_code == 200
@@ -563,6 +570,7 @@ with TestClient(main.app) as client:
     assert client.get('/api/multi/state').json()['accounts'] == ['a']
     assert client.get('/api/pets').status_code == 404
     assert client.get('/api/status').json()['mode'] == 'multi-account'
+    assert bool(polls) == (main.POLL_INTERVAL > 0)
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -572,12 +580,35 @@ with TestClient(main.app) as client:
             "IMMICH_ACCOUNTS_FILE": str(config),
             "DATA_DIR": str(tmp_path / "data"),
             "GPU_WORKERS": "9",
+            "POLL_INTERVAL": interval,
         },
         capture_output=True,
         text=True,
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_hidden_motion_video_is_not_discovered(setup_service):
+    service, fake, _, _, *_ = setup_service
+    video = fake.add_asset("user_a")
+    fake.assets[video].update(type="VIDEO", visibility="hidden")
+    fake.thumbnail_failures.add(video)
+    service.scan(["user_a"])
+    assert service.store.summary()["user_a"]["jobs"] == {"done": 1}
+    assert all(asset != video for _, asset, _ in fake.writes)
+
+
+def test_previously_queued_hidden_video_is_skipped(setup_service):
+    service, fake, _, _, *_ = setup_service
+    video = fake.add_asset("user_a")
+    fake.assets[video].update(type="VIDEO", visibility="hidden")
+    fake.thumbnail_failures.add(video)
+    service.account("user_a")
+    service.store.enqueue("user_a", [(video, "2020-02-03T12:00:00.000Z")])
+    service.scan(["user_a"])
+    assert service.store.summary()["user_a"]["jobs"] == {"done": 2}
+    assert all(asset != video for _, asset, _ in fake.writes)
 
 
 def test_discovery_failure_preserves_pages_without_advancing_watermark(

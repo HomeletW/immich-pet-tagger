@@ -80,13 +80,16 @@ async def polling_loop():
 async def lifespan(app: FastAPI):
     state.init()
     load_embed_cache(Path(DATA_DIR))
-    task = asyncio.create_task(polling_loop())
+    task = asyncio.create_task(polling_loop()) if POLL_INTERVAL > 0 else None
+    if task is None:
+        log.info("Automatic scanning disabled; manual scans remain available")
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     if MULTI_ACCOUNT:
         await asyncio.to_thread(multi_service.shutdown)
 
