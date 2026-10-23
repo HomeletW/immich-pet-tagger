@@ -1,6 +1,6 @@
 # Multi-account pet tagging
 
-This fork adds an opt-in mode for **one Immich server, several owners, one administrator, and shared pet enrollment**. It does not change Immich ownership, partner sharing, albums, timelines or phone synchronization.
+This fork adds an opt-in mode for **one Immich server, several owners, one administrator, and shared pet enrollment**. It preserves Immich ownership, partner sharing, timelines and phone synchronization. Optional managed albums share each pet’s matches across the configured accounts.
 
 ## What is shared
 
@@ -84,3 +84,18 @@ node --check app/static/multi.js
 ```
 
 Tests exercise ownership checks with a simulated Immich HTTP API, shared training, round-robin scheduling, restart persistence, retries, reference routing, rename/reset/deletion and API validation. ML packages are stubbed in unit tests. Real CUDA inference and actual Immich API compatibility still require a controlled deployment test with a small photo set before a full backfill.
+
+## Managed shared albums (opt-in)
+
+Set `IMMICH_ALBUM_OWNER_ACCOUNT=shared` to a configured account ID. That account owns one album per enrolled pet. All other configured owners are invited as editors so each API key can contribute its own assets. This enables sharing of matched assets across the configured accounts, including existing matches and false positives. No public link is created. Leaving the variable unset preserves tagging without album publication.
+
+Required extra key permissions:
+
+- Each contributor: `albumAsset.create` (and `album.read` for operational verification).
+- Album owner, additionally: `album.create`, `album.update`, `album.delete`, `albumAsset.delete`, `albumUser.create`, `albumUser.update`.
+
+Creation and renaming reconcile albums immediately. Both pet deletion actions delete the managed album; enrollment-only deletion preserves person/face records, while full deletion also removes those person records. Neither action deletes source assets. Failed deletion retains an intent record so hourly retries finish cleanup without recreating the album. Unrelated albums, even ones with identical names, are not adopted or deleted. Do not change the managed description marker or album ownership; failures are shown in the UI rather than modifying an unverified album.
+
+Hourly scans synchronize albums before and after tagging. **Sync shared albums** performs an album-only backfill/reconciliation without running ML (`POST /api/multi/albums/sync`). Existing person assignments are the source of membership; all search pages must succeed before removing stale contributions. Partners' assets are excluded from each contributing key by explicit ownership checks. Hidden and trashed assets and shared negative references are excluded. A persistent contribution journal allows removal of formerly managed matches while preserving unrelated manual additions. Removing a face assignment in Immich or saving a negative reference removes its managed album contribution on the next sync. Manually removing an otherwise matching asset from the album alone is not permanent: a subsequent sync restores it.
+
+Negative references suppress sharing for the whole asset across all pet albums, even if it contains multiple animals. They do not themselves remove existing face assignments. Album sync does not retune classification. API errors remain visible per pet and are retried hourly. Additional album viewers or public links block new synchronization until removed; changing the configured owner requires an explicit migration.

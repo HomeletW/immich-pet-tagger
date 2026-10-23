@@ -1,7 +1,7 @@
 """Single-server, multi-owner pet tagging with shared enrollment and inference.
 
 The administrator UI is trusted to access every configured account. Immich users
-retain their own ownership and permissions; this service never publishes albums.
+retain ownership; optional managed albums share matches among configured accounts.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +19,7 @@ import embedder as emb
 import immich
 import inference
 from multi_store import Store
+from multi_albums import Albums
 from poller import classify_outcome, THRESHOLD, THRESHOLD_FALLBACK
 
 log = logging.getLogger("multi-account")
@@ -29,7 +30,7 @@ class BusyError(RuntimeError):
 
 
 class Service:
-    def __init__(self, configured, root, batch_size=64, workers=8):
+    def __init__(self, configured, root, batch_size=64, workers=8, album_owner=None):
         self.accounts = configured
         self.root = Path(root)
         self.store = Store(root)
@@ -40,6 +41,7 @@ class Service:
         self.thread_lock = threading.Lock()
         self.scan_thread = None
         self.status = {"running": False, "error": None, "accounts": {}}
+        self.albums = Albums(self, album_owner)
 
     @contextmanager
     def exclusive(self):
@@ -69,6 +71,8 @@ class Service:
         snapshot = {**status, "accounts": status["accounts"].copy()}
         return {
             "accounts": list(self.accounts),
+            "album_sharing": {"enabled": bool(self.albums.owner_id), "owner": self.albums.owner_id,
+                "errors": {p["name"]: p["album_error"] for p in enrollment["pets"].values() if p.get("album_error")}},
             **enrollment,
             "scan": snapshot,
             "progress": self.store.summary(),
@@ -79,6 +83,7 @@ class Service:
 
     def create_pet(self, name, description="", since=None, until=None):
         with self.exclusive():
+            self.cancel.clear()
             doc = self.store.enrollment()
             if any(
                 p["name"].casefold() == name.casefold() for p in doc["pets"].values()
@@ -94,10 +99,12 @@ class Service:
                 "refs": [],
             }
             self.store.save(doc)
+            self.sync_albums(doc)
             return pet_id
 
     def update_pet(self, pet_id, fields):
         with self.exclusive():
+            self.cancel.clear()
             doc = self.store.enrollment()
             pet = doc["pets"][pet_id]
             if "name" in fields and any(
@@ -114,6 +121,7 @@ class Service:
             )
             self.store.save(doc)
             # Remote names are reconciled before scanning; failed accounts remain retryable.
+            self.sync_albums(doc)
 
     def add_reference(self, account_id, asset_id, pet_id=None, bbox=None):
         with self.exclusive():
@@ -144,18 +152,46 @@ class Service:
 
     def delete_pet(self, pet_id, *, local_only=False):
         with self.exclusive():
+            self.cancel.clear()
             doc = self.store.enrollment()
             pet = doc["pets"][pet_id]
-            if not local_only:
-                for account_id, person in list(pet["persons"].items()):
-                    self._remove_person(self.account(account_id), person)
-                    del pet["persons"][account_id]
-                    self.store.save(doc)  # partial success is restart-safe
-            del doc["pets"][pet_id]
+            pet["deleting"] = {"local_only": local_only}
+            self.store.save(doc)
+            self.finish_delete(pet_id, doc)
+
+    def finish_delete(self, pet_id, doc):
+        pet = doc["pets"][pet_id]
+        # Persist deletion intent; an hourly retry must never recreate this pet's album.
+        self.albums.delete(pet_id, pet)
+        self.store.save(doc)
+        if not pet["deleting"]["local_only"]:
+            for account_id, person in list(pet["persons"].items()):
+                self._remove_person(self.account(account_id), person)
+                del pet["persons"][account_id]
+                self.store.save(doc)
+        del doc["pets"][pet_id]
+        self.store.save(doc)
+
+    def sync_albums(self, doc):
+        for pet_id, pet in list(doc["pets"].items()):
+            if self.cancel.is_set():
+                return
+            if not self.albums.owner_id and not pet.get("deleting"):
+                continue
+            try:
+                if pet.get("deleting"):
+                    self.finish_delete(pet_id, doc)
+                else:
+                    self.albums.sync(pet_id, pet, doc)
+                    pet["album_error"] = None
+                    pet["album_synced_at"] = datetime.now(timezone.utc).isoformat()
+            except Exception as exc:
+                pet["album_error"] = str(exc) if isinstance(exc, (RuntimeError, ValueError)) else type(exc).__name__
             self.store.save(doc)
 
     def reset_pet(self, pet_id, account_id):
         with self.exclusive():
+            self.cancel.clear()
             doc = self.store.enrollment()
             pet = doc["pets"][pet_id]
             person = pet["persons"].get(account_id)
@@ -164,10 +200,11 @@ class Service:
                 del pet["persons"][account_id]
                 self.store.save(doc)
             # References are independent of the deleted person's ID. Rescan explicitly.
+            self.sync_albums(doc)
 
     def ensure_persons(self, account, doc):
         for pet in doc["pets"].values():
-            if not pet["refs"]:
+            if pet.get("deleting") or not pet["refs"]:
                 continue
             person = pet["persons"].get(account.id)
             if person:
@@ -197,7 +234,7 @@ class Service:
             yield
 
     def train(self, doc):
-        pets = {key: pet for key, pet in doc["pets"].items() if pet["refs"]}
+        pets = {key: pet for key, pet in doc["pets"].items() if pet["refs"] and not pet.get("deleting")}
         if not pets:
             return None
         return classifier.build_classifier(
@@ -329,7 +366,7 @@ class Service:
             )
             return "retry"
 
-    def start_scan(self, selected=None, since=None, until=None):
+    def start_scan(self, selected=None, since=None, until=None, albums_only=False):
         with self.thread_lock:
             if self.scan_thread and self.scan_thread.is_alive():
                 raise BusyError("A scan is already running")
@@ -339,7 +376,7 @@ class Service:
 
             def run():
                 try:
-                    self.scan(selected, since, until)
+                    self.scan(selected, since, until, albums_only=albums_only)
                 except BusyError:
                     self.status["error"] = (
                         "Enrollment changed while starting; retry the scan"
@@ -356,7 +393,7 @@ class Service:
             self.scan_thread.join()
         self.store.close()
 
-    def scan(self, selected=None, since=None, until=None):
+    def scan(self, selected=None, since=None, until=None, albums_only=False):
         with self.exclusive():
             cycle_started = time.time()
             self.status = {
@@ -368,7 +405,12 @@ class Service:
             }
             try:
                 doc = self.store.enrollment()
-                if not any(p["refs"] for p in doc["pets"].values()):
+                self.status["phase"] = "syncing_albums"
+                self.sync_albums(doc)
+                self.status["phase"] = "discovering"
+                if albums_only:
+                    return
+                if not any(p["refs"] and not p.get("deleting") for p in doc["pets"].values()):
                     return
                 enabled = []
                 for account_id in selected or list(self.accounts):
@@ -441,6 +483,9 @@ class Service:
                     emb.save_embed_cache()
                     self.status["phase"] = "unloading_models"
                     self.status["current_account"] = None
+                if not self.cancel.is_set():
+                    self.status["phase"] = "syncing_albums"
+                    self.sync_albums(doc)
             except Exception as exc:
                 self.status["error"] = (
                     str(exc)

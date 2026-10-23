@@ -17,6 +17,9 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS album_assets (
+                album TEXT NOT NULL, account TEXT NOT NULL, asset TEXT NOT NULL,
+                PRIMARY KEY(album,account,asset));
             CREATE TABLE IF NOT EXISTS enrollment (
                 id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL);
             INSERT OR IGNORE INTO enrollment VALUES (1, '{"pets":{},"negatives":[]}');
@@ -180,3 +183,22 @@ class Store:
                 }
                 for r in rows
             ]
+
+    def album_assets(self, album, account):
+        with self.lock:
+            return {r[0] for r in self.db.execute(
+                "SELECT asset FROM album_assets WHERE album=? AND account=?", (album, account))}
+
+    def record_album_assets(self, album, account, assets):
+        with self.lock, self.db:
+            self.db.executemany("INSERT OR IGNORE INTO album_assets VALUES (?,?,?)",
+                                [(album, account, asset) for asset in assets])
+
+    def forget_album_assets(self, album, account, assets):
+        with self.lock, self.db:
+            self.db.executemany("DELETE FROM album_assets WHERE album=? AND account=? AND asset=?",
+                                [(album, account, asset) for asset in assets])
+
+    def clear_album_assets(self, album):
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM album_assets WHERE album=?", (album,))

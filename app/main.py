@@ -29,6 +29,7 @@ if MULTI_ACCOUNT:
         Path(os.environ.get('DATA_DIR', '/data')) / 'multi',
         batch_size=int(os.environ.get('ACCOUNT_BATCH_SIZE', '64')),
         workers=int(os.environ.get('SCAN_WORKERS', '8')),
+        album_owner=os.environ.get('IMMICH_ALBUM_OWNER_ACCOUNT') or None,
     )
     api_router = create_router(multi_service)
 else:

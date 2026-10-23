@@ -144,6 +144,13 @@ def create_router(service):
         call(service.start_scan, [body.account] if body.account else None, since, until)
         return {"ok": True}
 
+    @router.post("/albums/sync")
+    def sync_albums():
+        if not service.albums.owner_id:
+            raise HTTPException(400, "Shared albums are not enabled")
+        call(service.start_scan, albums_only=True)
+        return {"ok": True}
+
     @router.post("/scan/stop")
     def stop():
         service.cancel.set()
