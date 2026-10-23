@@ -1,0 +1,34 @@
+# Standalone example. The existing Immich installation is not modified.
+services:
+  pet-tagger:
+    build:
+      context: .
+      args:
+        CUDA: "true"
+    image: immich-pet-tagger:multi-account-local
+    restart: unless-stopped
+    stop_grace_period: 2m
+    ports:
+      - "127.0.0.1:2287:8000"
+    environment:
+      IMMICH_URL: ${IMMICH_URL:?Set the reachable Immich server URL}
+      IMMICH_ACCOUNTS_FILE: /run/secrets/immich_accounts
+      POLL_INTERVAL: "3600"
+      ACCOUNT_BATCH_SIZE: "64"
+      SCAN_WORKERS: "8"
+      YOLO_BATCH_SIZE: "8"
+      TAG_NAME: Pets/Review
+    secrets:
+      - immich_accounts
+    volumes:
+      - ./data-multi:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+secrets:
+  immich_accounts:
+    file: ./accounts.json

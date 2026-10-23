@@ -1,0 +1,5 @@
+[
+  {"id": "user_a", "api_key_env": "USER_A_API_KEY"},
+  {"id": "user_b", "api_key_env": "USER_B_API_KEY"},
+  {"id": "shared", "api_key_env": "SHARED_API_KEY"}
+]

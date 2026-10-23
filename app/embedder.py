@@ -207,7 +207,7 @@ def fetch_thumbnail(asset_id: str) -> Image.Image | None:
     try:
         r = requests.get(
             f"{imm.IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview",
-            headers={"x-api-key": imm.IMMICH_API_KEY},
+            headers=imm.headers(),
             timeout=30,
         )
         if r.status_code == 200 and r.content:
@@ -288,7 +288,7 @@ def _benchmark_fetch_thumbnail(asset_id: str) -> Image.Image | None:
     try:
         r = requests.get(
             f"{imm.IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview",
-            headers={"x-api-key": imm.IMMICH_API_KEY},
+            headers=imm.headers(),
             timeout=30,
         )
         if r.status_code == 200 and r.content:
